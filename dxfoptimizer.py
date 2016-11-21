@@ -49,6 +49,39 @@ def scale(points, scale):
 def shift(points, offset):
     return [[v+o for v,o in zip(point, offset)] for point in points]
 
+def mapfuncwithargs(func, iterable, *args):
+    return map(lambda v: func(v, *args), iterable)
+    
+def apply_offsets(individual, shapes):
+    offsets = []
+    angles = []
+
+    for i in range(len(individual)/3):
+        offsets.append((individual[i*3],individual[i*3+1]))
+        angles.append(individual[i*3+2])
+        
+    offset_polygons = []
+    
+    for angle, offset, polygon in zip(angles, offsets, shapes):
+        offset_polygon = shapely.affinity.translate(polygon, xoff=offset[0], yoff=offset[1])
+        offset_polygon = shapely.affinity.rotate(offset_polygon, angle, use_radians=True)
+        offset_polygons.append(offset_polygon)
+        
+    return offset_polygons   
+    
+
+def draw_intersections(ax, polygons):
+    for polygon1 in polygons:
+        for polygon2 in polygons:
+            if polygon1 == polygon2:
+                continue
+                    
+            intersection = polygon1.intersection(polygon2)
+            
+            if intersection.geom_type == 'Polygon':
+                patch = PolygonPatch(intersection, facecolor=(1.0,0.,0.), edgecolor=v_color(intersection), alpha=0.5, zorder=2)
+                ax.add_patch(patch) 
+                
 def evaluate(individual):
     global polygons
     offsets = []
@@ -83,6 +116,32 @@ def evaluate(individual):
     
     return fitness,
     
+def draw_individual(ax, individual):
+    if ax is None:
+        return 
+        
+    ax.cla()
+    offset_polygons = apply_offsets(individual, polygons)
+    
+    for offset_polygon in offset_polygons:
+        plot_coords(ax, offset_polygon.exterior)
+
+        patch = PolygonPatch(offset_polygon, facecolor=v_color(offset_polygon), edgecolor=v_color(offset_polygon), alpha=0.5, zorder=1)
+        ax.add_patch(patch)
+    
+        outline = MultiPolygon(offset_polygons).convex_hull
+        patch = PolygonPatch(outline, facecolor=(.0,1.,0.), alpha=0.2, zorder=0)
+        ax.add_patch(patch) 
+        
+        draw_intersections(ax, offset_polygons)
+        
+    pyplot.draw()
+    pyplot.show()
+        
+    
+    from time import sleep
+    
+    #sleep(0.1)
 
 def create_toolbox(num_shapes):
     creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
@@ -109,28 +168,42 @@ def create_toolbox(num_shapes):
             ind.fitness.values = fit
     toolbox.register("evaluate_invalid", evaluate_invalid)
     
-    def greedy_opt(individual, stepsize=1., i=None):
-        if i is None:
-            i = random.randint(0, len(individual)-1)
+    def greedy_opt(individual, visualize=False, ax=None):
         
-        ind1 = toolbox.clone(individual)
-        ind1[i] += stepsize
-        ind1.fitness.values = toolbox.evaluate(ind1)
-        
-        ind2 = toolbox.clone(individual)
-        ind2[i] -= stepsize
-        ind2.fitness.values = toolbox.evaluate(ind2)
-        
-        if ind1.fitness.values < individual.fitness.values:
-            return toolbox.greedy_opt(ind1, stepsize)
+        stepsize = 1.
+        for i in range(len(individual)):
             
-        if ind2.fitness.values < individual.fitness.values:
-            return toolbox.greedy_opt(ind2, stepsize)
+            while stepsize > 0.05:
+                
+                ind1 = toolbox.clone(individual)
+                ind1[i] += stepsize
+                ind1.fitness.values = toolbox.evaluate(ind1)
+                
+                ind2 = toolbox.clone(individual)
+                ind2[i] -= stepsize
+                ind2.fitness.values = toolbox.evaluate(ind2)
+                
+                if ind1.fitness.values < individual.fitness.values:
+                    individual = ind1
+                    individual.fitness.values = ind1.fitness.values
+                    continue
+                    
+                if ind2.fitness.values < individual.fitness.values:
+                    individual = ind2
+                    individual.fitness.values = ind2.fitness.values
+                    continue
+                    
+                stepsize = stepsize/2.
+                
+                #print "No improvement"
+                draw_individual(ax, individual)
             
-        if stepsize < 0.1:
-            return individual
+            stepsize = 1.
             
-        return toolbox.greedy_opt(individual, stepsize/2., i)
+            
+            #print "Stepsize", i, stepsize
+            
+                
     
     toolbox.register("greedy_opt", greedy_opt)
     
@@ -172,38 +245,6 @@ def parse_shapes(dxf_files):
 
 polygons = object()
 
-def mapfuncwithargs(func, iterable, *args):
-    return map(lambda v: func(v, *args), iterable)
-    
-def apply_offsets(individual, shapes):
-    offsets = []
-    angles = []
-
-    for i in range(len(individual)/3):
-        offsets.append((individual[i*3],individual[i*3+1]))
-        angles.append(individual[i*3+2])
-        
-    offset_polygons = []
-    
-    for angle, offset, polygon in zip(angles, offsets, shapes):
-        offset_polygon = shapely.affinity.translate(polygon, xoff=offset[0], yoff=offset[1])
-        offset_polygon = shapely.affinity.rotate(offset_polygon, angle, use_radians=True)
-        offset_polygons.append(offset_polygon)
-        
-    return offset_polygons   
-    
-
-def draw_intersections(ax, polygons):
-    for polygon1 in polygons:
-        for polygon2 in polygons:
-            if polygon1 == polygon2:
-                continue
-                    
-            intersection = polygon1.intersection(polygon2)
-            
-            if intersection.geom_type == 'Polygon':
-                patch = PolygonPatch(intersection, facecolor=(1.0,0.,0.), edgecolor=v_color(intersection), alpha=0.5, zorder=2)
-                ax.add_patch(patch) 
     
 
 def optimize(toolbox, shapes, visualize=False):
@@ -229,18 +270,19 @@ def optimize(toolbox, shapes, visualize=False):
     stats.register("min", numpy.min)
     stats.register("max", numpy.max)
         
-    pop = toolbox.population(n=50)
+    pop = toolbox.population(n=100)
     CXPB, MUTPB, NGEN = 0.2, 0.5, 100
-    num_elites = 1
 
     # Evaluate the entire population
     toolbox.evaluate_invalid(pop)
     
     while True:
         for g in range(NGEN):
+            print "Evolvign"
+            
             # Select the next generation individuals
             
-            offspring = toolbox.select(pop, len(pop)-num_elites)
+            offspring = toolbox.select(pop, 2*len(pop))
             # Clone the selected individuals
             offspring = map(toolbox.clone, offspring)
 
@@ -260,53 +302,66 @@ def optimize(toolbox, shapes, visualize=False):
             toolbox.evaluate_invalid(offspring)
 
             # The population is entirely replaced by the offspring
-            elites = tools.selBest(pop, num_elites)
-            pop[:num_elites] = elites
-            pop[num_elites:] = offspring
+            
+            
+            mixed_pop = toolbox.population(n=3*len(pop))
+            mixed_pop[:len(pop)] = pop[:]
+            mixed_pop[len(pop):] = offspring
+            
+            #print map(lambda i: i.fitness.values, mixed_pop), len(mixed_pop)
+            
+            new_generation = tools.selBest(mixed_pop, len(pop))
+            pop[:] = new_generation
+
+
 
             #pop[:] = toolbox.map(toolbox.greedy_opt, pop)
             
-            print stats.compile(pop)
+            print "Generation", g, stats.compile(pop)
             
-            if visualize:
-                ax.cla()
-                
-                individual = tools.selBest(pop,1)[0]
-                offset_polygons = apply_offsets(individual, shapes)
             
-                for offset_polygon in offset_polygons:
-                    plot_coords(ax, offset_polygon.exterior)
+            print "Greedy optimization"
+            
+            individual = tools.selBest(pop,1)[0]
+            
+            oldfit = individual.fitness.values
+            toolbox.greedy_opt(individual, visualize=True, ax=ax)
+            
+            print oldfit, individual.fitness.values
+            #if visualize:
+                
+                
+                
+                #ax.cla()
+                #offset_polygons = apply_offsets(individual, shapes)
+            
+                #for offset_polygon in offset_polygons:
+                    #plot_coords(ax, offset_polygon.exterior)
 
-                    patch = PolygonPatch(offset_polygon, facecolor=v_color(offset_polygon), edgecolor=v_color(offset_polygon), alpha=0.5, zorder=1)
-                    ax.add_patch(patch)
+                    #patch = PolygonPatch(offset_polygon, facecolor=v_color(offset_polygon), edgecolor=v_color(offset_polygon), alpha=0.5, zorder=1)
+                    #ax.add_patch(patch)
                 
-                outline = MultiPolygon(offset_polygons).convex_hull
-                patch = PolygonPatch(outline, facecolor=(.0,1.,0.), alpha=0.2, zorder=0)
-                ax.add_patch(patch) 
+                #outline = MultiPolygon(offset_polygons).convex_hull
+                #patch = PolygonPatch(outline, facecolor=(.0,1.,0.), alpha=0.2, zorder=0)
+                #ax.add_patch(patch) 
                 
-                draw_intersections(ax, offset_polygons)
+                #draw_intersections(ax, offset_polygons)
                 
-                pyplot.draw()
-                pyplot.show()
+                #pyplot.draw()
+                #pyplot.show()
 
-        new_pop = map(toolbox.clone, [individual for i in range(len(pop)-num_elites)])
+
+        #Nuke population
         
-        for i in range(5):
-            for mutant in new_pop:
+        for mutant in pop:
+            for i in range(len(shapes)*2):
                 toolbox.mutate(mutant)
-                del mutant.fitness.values
-        
-        elites = tools.selBest(pop, num_elites)
-        pop[:num_elites] = elites
-        pop[num_elites:] = new_pop        
-            
+            del mutant.fitness.values
 
-        invalid_ind = [ind for ind in pop if not ind.fitness.valid]
-        fitnesses = map(toolbox.evaluate, invalid_ind)
-        for ind, fit in zip(invalid_ind, fitnesses):
-            ind.fitness.values = fit
+        # Evaluate the individuals with an invalid fitness
+        toolbox.evaluate_invalid(pop)
             
-        print "Restarting"
+        print "Nuked"
 
 def create_parser():
     parser = argparse.ArgumentParser()
